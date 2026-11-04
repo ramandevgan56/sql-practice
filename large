@@ -1,0 +1,121 @@
+-- ============================================================================
+-- OBJECTIVE: Build a high-performance, modular enterprise metrics dashboard.
+-- ARCHITECTURE: Multi-layered CTE pipeline designed for readability and indexing.
+-- ============================================================================
+
+WITH 
+-- ----------------------------------------------------------------------------
+-- LAYER 1: Ingestion & Heavy Data Filtering
+-- ----------------------------------------------------------------------------
+raw_transactions AS (
+    SELECT 
+        transaction_id,
+        account_id,
+        store_id,
+        transaction_amount,
+        transaction_date,
+        -- Standardize text output formatting directly at the source
+        UPPER(payment_method) AS formatted_payment_method,
+        -- Clean and structure standard ISO dates
+        CAST(transaction_date AS DATE) AS clean_date
+    FROM enterprise_sales.transaction_ledger
+    WHERE transaction_date >= '2025-01-01'
+      AND status = 'COMPLETED'
+),
+
+-- ----------------------------------------------------------------------------
+-- LAYER 2: Context Enrichment via Staged Inner Joins
+-- ----------------------------------------------------------------------------
+enriched_sales AS (
+    SELECT 
+        t.transaction_id,
+        t.account_id,
+        t.store_id,
+        t.transaction_amount,
+        t.clean_date,
+        t.formatted_payment_method,
+        a.region,
+        a.customer_tier,
+        s.store_name,
+        s.market_segment
+    FROM raw_transactions t
+    -- Inner join optimizations mapping transactional variables to dimension tables
+    INNER JOIN enterprise_crm.accounts a 
+        ON t.account_id = a.account_id
+    INNER JOIN enterprise_geo.stores s 
+        ON t.store_id = s.store_id
+),
+
+-- ----------------------------------------------------------------------------
+-- LAYER 3: Analytical Window Computations
+-- ----------------------------------------------------------------------------
+window_metrics AS (
+    SELECT 
+        transaction_id,
+        account_id,
+        region,
+        customer_tier,
+        transaction_amount,
+        clean_date,
+        -- Window calculation: Run historical sequential delta analysis per account
+        ROW_NUMBER() OVER (
+            PARTITION BY account_id 
+            ORDER BY clean_date DESC, transaction_id DESC
+        ) AS transaction_sequence_desc,
+        -- Window calculation: Multi-partition running financial sums
+        SUM(transaction_amount) OVER (
+            PARTITION BY account_id, EXTRACT(YEAR FROM clean_date)
+        ) AS account_annual_cumulative_spend,
+        -- Window calculation: Comparative market basket analytics
+        AVG(transaction_amount) OVER (
+            PARTITION BY region, customer_tier
+        ) AS cohort_average_spend
+    FROM enriched_sales
+),
+
+-- ----------------------------------------------------------------------------
+-- LAYER 4: Deep Aggregation and Business Logic Segmentations
+-- ----------------------------------------------------------------------------
+aggregated_regional_analytics AS (
+    SELECT 
+        region,
+        customer_tier,
+        COUNT(DISTINCT account_id) AS unique_active_customers,
+        COUNT(transaction_id) AS total_transactions_processed,
+        SUM(transaction_amount) AS gross_revenue,
+        
+        -- High-volume conditional case statement pattern
+        SUM(CASE WHEN formatted_payment_method = 'CREDIT_CARD' THEN transaction_amount ELSE 0 END) AS credit_card_revenue,
+        SUM(CASE WHEN formatted_payment_method = 'DIGITAL_WALLET' THEN transaction_amount ELSE 0 END) AS digital_wallet_revenue,
+        
+        -- Aggregated Statistical Evaluation
+        ROUND(AVG(transaction_amount), 2) AS average_order_value,
+        MAX(transaction_amount) AS absolute_peak_transaction
+    FROM window_metrics
+    WHERE transaction_sequence_desc <= 50 -- Restrict analysis context strictly to the last 50 transactions per client
+    GROUP BY region, customer_tier
+)
+
+-- ----------------------------------------------------------------------------
+-- FINAL SELECT: Presentation Layer & Threshold Evaluation
+-- ----------------------------------------------------------------------------
+SELECT 
+    region,
+    customer_tier,
+    unique_active_customers,
+    total_transactions_processed,
+    gross_revenue,
+    credit_card_revenue,
+    digital_wallet_revenue,
+    average_order_value,
+    absolute_peak_transaction,
+    -- Dynamic status flags based on enterprise target criteria
+    CASE 
+        WHEN gross_revenue >= 1000000.00 AND average_order_value >= 150.00 THEN 'ELITE_PERFORMING_COHORT'
+        WHEN gross_revenue >= 500000.00 THEN 'TARGET_COMPLIANT'
+        ELSE 'UNDERPERFORMING_ATTENTION_REQUIRED'
+    END AS cohort_operational_status
+FROM aggregated_regional_analytics
+-- Filter post-aggregation matrix using a HAVING clause threshold
+HAVING total_transactions_processed >= 100 
+ORDER BY gross_revenue DESC;
