@@ -1,0 +1,8 @@
+DECLARE
+   -- (Optional) This is where you declare your variables and constants.
+BEGIN
+   -- (Mandatory) This is where you write your logic and execution commands.
+EXCEPTION
+   -- (Optional) This is where you catch and handle errors.
+END;
+/
